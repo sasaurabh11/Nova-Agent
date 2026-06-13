@@ -1,0 +1,46 @@
+{
+  "ruleset_id": "rs_acme_v1",
+  "customer_id": "cust_acme",
+  "customer_name": "ACME Imports GmbH",
+  "version": 1,
+  "rules": {
+    "consignee_name": {
+      "type": "exact",
+      "value": "ACME Imports GmbH",
+      "description": "Consignee must be the customer's exact legal name."
+    },
+    "incoterms": {
+      "type": "allowed_set",
+      "values": ["FOB", "CIF", "DAP"],
+      "description": "Customer only accepts these Incoterms."
+    },
+    "hs_code":  {
+      "type": "format",
+      "pattern": "^\\d{4}\\.\\d{2}",
+      "allowed_prefixes": ["8471", "8517", "8528"],
+      "description": "HS code must be NNNN.NN and in the customer's tariff scope (electronics)."
+    },
+    "port_of_discharge": {
+      "type": "exact",
+      "value": "Hamburg",
+      "description": "Customer receives at Hamburg."
+    },
+    "port_of_loading": {
+      "type": "presence",
+      "description": "Port of loading must be stated."
+    },
+    "gross_weight": {
+      "type": "presence",
+      "numeric": true,
+      "description": "Gross weight must be present and numeric (with unit)."
+    },
+    "invoice_number": {
+      "type": "presence",
+      "description": "Invoice reference must be present."
+    },
+    "description_of_goods": {
+      "type": "presence",
+      "description": "Goods description must be present."
+    }
+  }
+}
