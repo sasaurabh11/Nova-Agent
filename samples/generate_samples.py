@@ -47,6 +47,13 @@ MISMATCH_INVOICE = {
     "port_of_discharge": "Rotterdam",
     "invoice_number": "INV-2026-0419",
 }
+# Clean & readable, but the supplier left out gross weight AND invoice number.
+# Those come back not_found -> uncertain -> the Router flags it for human review
+# (no rule is violated, so it is NOT an amendment). A real "SU forgot a field" case.
+INCOMPLETE_INVOICE = {
+    k: v for k, v in CLEAN_INVOICE.items()
+    if k not in ("gross_weight", "invoice_number")
+}
 
 
 def _draw(c: canvas.Canvas, title: str, values: dict) -> None:
@@ -108,6 +115,7 @@ def main() -> None:
     (CLEAN / "commercial_invoice_acme.pdf").write_bytes(inv)
     (CLEAN / "bill_of_lading_acme.pdf").write_bytes(make_pdf(CLEAN_BOL, "BILL OF LADING"))
     (CLEAN / "commercial_invoice_mismatch.pdf").write_bytes(make_pdf(MISMATCH_INVOICE, "COMMERCIAL INVOICE"))
+    (CLEAN / "commercial_invoice_incomplete.pdf").write_bytes(make_pdf(INCOMPLETE_INVOICE, "COMMERCIAL INVOICE"))
     (MESSY / "commercial_invoice_scan.png").write_bytes(degrade_to_png(inv))
 
     print("Generated 4 sample documents:")
