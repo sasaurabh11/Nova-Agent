@@ -1,20 +1,40 @@
+"""Behaviour D — natural-language query over stored output, GROUNDED + SAFE.
+
+Chain: NL question -> LLM -> SQL -> validate -> execute -> answer + rows.
+
+Validation is engine-grade, not regex:
+  1. sqlglot AST parse — must be exactly ONE `SELECT`, contain no
+     INSERT/UPDATE/DELETE/DDL nodes, and reference only whitelisted tables;
+     a LIMIT is injected if missing.
+  2. EXPLAIN dry-run on a READ-ONLY connection — SQLite compiles the statement
+     (catching syntax / unknown-column / unknown-table errors) WITHOUT executing
+     its effects, and the read-only connection makes writes physically impossible.
+
+If validation fails, the error is fed back to the LLM to correct the SQL, for up
+to MAX_QUERY_ROUNDS attempts. If it still can't produce a valid, safe query we
+say so — we never fabricate an answer.
+"""
 from __future__ import annotations
 
-import re
+import sqlite3
+
+import sqlglot
+from sqlglot import exp
 
 from backend.domain.schemas import QueryAnswer
 from backend.llm.client import LLMClient
 from backend.storage.db import connect
 
+MAX_QUERY_ROUNDS = 2  # initial attempt + correction rounds
+
 _ALLOWED_TABLES = {
     "shipments", "documents", "customers", "rulesets",
     "extractions", "validations", "decisions", "agent_runs",
-    "json_each",  # used for unpacking validation results
 }
-_FORBIDDEN = re.compile(
-    r"\b(insert|update|delete|drop|alter|create|replace|attach|detach|"
-    r"pragma|vacuum|reindex)\b",
-    re.IGNORECASE,
+# Statement types that must never appear anywhere in the tree.
+_FORBIDDEN_NODES = (
+    exp.Insert, exp.Update, exp.Delete, exp.Drop, exp.Alter, exp.Create,
+    exp.Command,  # raw commands: PRAGMA, VACUUM, ATTACH, etc.
 )
 
 SCHEMA_DESC = """
@@ -37,54 +57,98 @@ class UnsafeQuery(Exception):
     pass
 
 
-def _guard(sql: str) -> str:
-    s = sql.strip().rstrip(";").strip()
-    if ";" in s:
-        raise UnsafeQuery("multiple statements are not allowed")
-    if not re.match(r"(?is)^\s*select\b", s):
+def validate_sql(sql: str) -> str:
+    """AST-validate the SQL and return a normalised, LIMIT-guarded SELECT.
+    Raises UnsafeQuery on any structural violation."""
+    try:
+        statements = sqlglot.parse(sql, read="sqlite")
+    except Exception as e:  # noqa: BLE001 — parse failure is unsafe/invalid
+        raise UnsafeQuery(f"could not parse SQL: {e}")
+
+    statements = [s for s in statements if s is not None]
+    if len(statements) != 1:
+        raise UnsafeQuery("exactly one statement is allowed")
+    tree = statements[0]
+
+    if not isinstance(tree, exp.Select):
         raise UnsafeQuery("only SELECT statements are allowed")
-    if _FORBIDDEN.search(s):
-        raise UnsafeQuery("statement contains a forbidden keyword")
-    refs = re.findall(r"(?is)\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_]*)", s)
-    for t in refs:
-        if t.lower() not in _ALLOWED_TABLES:
-            raise UnsafeQuery(f"table '{t}' is not queryable")
-    if not re.search(r"(?is)\blimit\b", s):
-        s += " LIMIT 100"
-    return s
+
+    for node in tree.walk():
+        if isinstance(node, _FORBIDDEN_NODES):
+            raise UnsafeQuery(f"disallowed statement type: {type(node).__name__}")
+
+    for table in tree.find_all(exp.Table):
+        name = (table.name or "").lower()
+        if name and name not in _ALLOWED_TABLES:
+            raise UnsafeQuery(f"table '{table.name}' is not queryable")
+
+    # Inject a LIMIT if the model forgot one (cost / runaway-result guard).
+    if not tree.find(exp.Limit):
+        tree = tree.limit(100)
+
+    return tree.sql(dialect="sqlite")
 
 
-def _summarize(question: str, rows: list[dict]) -> str:
+def explain_dry_run(sql: str) -> None:
+    """Compile the statement with EXPLAIN on a read-only connection. This catches
+    syntax / unknown-column / unknown-table errors WITHOUT running the query.
+    Raises sqlite3.Error if the statement is invalid."""
+    conn = connect(read_only=True)
+    try:
+        conn.execute("EXPLAIN " + sql)
+    finally:
+        conn.close()
+
+
+def _summarize(rows: list[dict]) -> str:
     if not rows:
         return "No matching records were found."
     if len(rows) == 1 and len(rows[0]) == 1:
-        (k, v), = rows[0].items()
+        (_, v), = rows[0].items()
         return f"{v}"
     return f"Found {len(rows)} matching record(s)."
 
 
 def answer_question(question: str, client: LLMClient | None = None) -> QueryAnswer:
     client = client or LLMClient()
-    try:
-        raw_sql = client.nl_to_sql(question, SCHEMA_DESC)
-    except Exception as e:  # noqa: BLE001
-        return QueryAnswer(question=question, answer="", grounded=False,
-                           error=f"could not generate a query: {e}")
-    try:
-        sql = _guard(raw_sql)
-    except UnsafeQuery as e:
-        return QueryAnswer(question=question, answer="", sql=raw_sql, grounded=False,
-                           error=f"refused unsafe query: {e}")
+    raw_sql: str | None = None
+    last_error: str | None = None
 
-    conn = connect(read_only=True)
-    try:
-        cur = conn.execute(sql)
-        rows = [dict(r) for r in cur.fetchall()]
-    except Exception as e:  # noqa: BLE001
-        return QueryAnswer(question=question, answer="", sql=sql, grounded=False,
-                           error=f"query execution failed: {e}")
-    finally:
-        conn.close()
+    for attempt in range(MAX_QUERY_ROUNDS):
+        # 1) generate (or, on a later round, correct) the SQL
+        try:
+            if attempt == 0:
+                raw_sql = client.nl_to_sql(question, SCHEMA_DESC)
+            else:
+                raw_sql = client.fix_sql(question, SCHEMA_DESC, raw_sql or "", last_error or "")
+        except Exception as e:  # noqa: BLE001
+            return QueryAnswer(question=question, answer="", grounded=False,
+                               error=f"could not generate a query: {e}")
 
-    return QueryAnswer(question=question, answer=_summarize(question, rows),
-                       sql=sql, rows=rows, grounded=True)
+        # 2) validate: AST structural checks, then EXPLAIN dry-run
+        try:
+            sql = validate_sql(raw_sql)
+            explain_dry_run(sql)
+        except (UnsafeQuery, sqlite3.Error) as e:
+            last_error = f"{type(e).__name__}: {e}"
+            continue  # feed the error back to the LLM and try again
+
+        # 3) safe + valid -> execute for real (still read-only)
+        conn = connect(read_only=True)
+        try:
+            rows = [dict(r) for r in conn.execute(sql).fetchall()]
+        except Exception as e:  # noqa: BLE001
+            last_error = f"execution failed: {e}"
+            conn.close()
+            continue
+        finally:
+            conn.close()
+
+        return QueryAnswer(question=question, answer=_summarize(rows),
+                           sql=sql, rows=rows, grounded=True)
+
+    return QueryAnswer(
+        question=question, answer="", sql=raw_sql, grounded=False,
+        error=f"could not produce a valid, safe query after {MAX_QUERY_ROUNDS} "
+              f"attempts: {last_error}",
+    )

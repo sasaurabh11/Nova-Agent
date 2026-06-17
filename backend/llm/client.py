@@ -154,3 +154,35 @@ class LLMClient:
             resp = self._retry(call)
             self._record(usage, resp)
             return json.loads(resp.text)["sql"]
+
+    def fix_sql(
+        self, question: str, schema_desc: str, bad_sql: str, error: str,
+        shipment_id=None,
+    ) -> str:
+        with track("query", self.cfg.model, shipment_id) as usage:
+            system = (
+                "You fix a SQLite SELECT that failed validation. Return a corrected "
+                "single read-only SELECT (no INSERT/UPDATE/DELETE/DDL, one statement, "
+                "include a LIMIT, use only the given tables/columns). "
+                'Return STRICT JSON: {"sql": "<select ...>"}.'
+            )
+            prompt = (
+                f"SCHEMA:\n{schema_desc}\n\nQUESTION: {question}\n\n"
+                f"PREVIOUS SQL (rejected):\n{bad_sql}\n\nERROR:\n{error}\n\n"
+                "Return corrected SQL."
+            )
+
+            def call():
+                return self._client.models.generate_content(
+                    model=self.cfg.model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system,
+                        response_mime_type="application/json",
+                        temperature=0,
+                    ),
+                )
+
+            resp = self._retry(call)
+            self._record(usage, resp)
+            return json.loads(resp.text)["sql"]

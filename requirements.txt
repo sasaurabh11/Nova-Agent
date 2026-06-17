@@ -6,6 +6,7 @@ python-multipart==0.0.20          # file uploads in FastAPI
 langgraph==0.2.60
 langgraph-checkpoint-sqlite==2.0.1
 google-genai==1.9.0
+sqlglot==25.34.1                  # AST validation of LLM-generated SQL (safety)
 PyMuPDF==1.25.1 
 Pillow==11.1.0                    # degrade that image (downscale/skew/noise)
 reportlab==4.2.5 
