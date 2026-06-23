@@ -22,75 +22,57 @@ from backend.pipeline.state import PipelineState, doc_from_dict, doc_to_dict
 from backend.storage import repo
 
 
-# Nodes — each is small, typed, and fail-loud (errors -> state.errors).
 def _extractor_node(state: PipelineState) -> dict:
     client = LLMClient()
+    sid = state["shipment_id"]
     extractions: list[dict] = []
-    errors = list(state.get("errors", []))
     for d in state["documents"]:
         doc: DocumentRef = doc_from_dict(d)
-        try:
-            ext = extract_document(doc, client)
-            extractions.append(ext.model_dump(mode="json"))
-        except Exception as e:  # noqa: BLE001 — fail loud, don't swallow
-            msg = f"extractor failed for {doc.filename}: {type(e).__name__}: {e}"
-            errors.append(msg)
-            log_event("node_error", node="extractor", shipment_id=state["shipment_id"], error=msg)
-    return {"extractions": extractions, "errors": errors}
+        existing = repo.get_extraction_for_document(doc.document_id, sid)
+        if existing:  # resume: reuse a previously-extracted doc, don't re-call vision
+            extractions.append(existing)
+            log_event("extraction_reused", shipment_id=sid, document_id=doc.document_id)
+            continue
+        ext = extract_document(doc, client)  # raises on failure -> run halts, worker retries
+        extractions.append(ext.model_dump(mode="json"))
+    repo.set_shipment_stage(sid, "extracted")
+    return {"extractions": extractions}
 
 
 def _validator_node(state: PipelineState) -> dict:
     ruleset = repo.get_ruleset(state["ruleset_id"])
     if ruleset is None:
-        return {"errors": state.get("errors", []) + [f"ruleset {state['ruleset_id']} not found"]}
+        raise RuntimeError(f"ruleset {state['ruleset_id']} not found")
     validations: list[dict] = []
-    errors = list(state.get("errors", []))
     for e in state["extractions"]:
-        try:
-            ext = ExtractionResult(**e)
-            val = validate_extraction(ext, ruleset)
-            validations.append(val.model_dump(mode="json"))
-        except Exception as exc:  # noqa: BLE001
-            msg = f"validator failed: {type(exc).__name__}: {exc}"
-            errors.append(msg)
-            log_event("node_error", node="validator", shipment_id=state["shipment_id"], error=msg)
-    return {"validations": validations, "errors": errors}
+        val = validate_extraction(ExtractionResult(**e), ruleset)  # idempotent save
+        validations.append(val.model_dump(mode="json"))
+    repo.set_shipment_stage(state["shipment_id"], "validated")
+    return {"validations": validations}
 
 
 def _cross_validator_node(state: PipelineState) -> dict:
-    errors = list(state.get("errors", []))
-    try:
-        extractions = [ExtractionResult(**e) for e in state.get("extractions", [])]
-        cv = cross_validate(extractions)
-        if extractions:
-            repo.save_cross_validation(cv)
-        return {"cross_validation": cv.model_dump(mode="json"), "errors": errors}
-    except Exception as exc:  # noqa: BLE001
-        msg = f"cross-validator failed: {type(exc).__name__}: {exc}"
-        errors.append(msg)
-        log_event("node_error", node="cross_validator",
-                  shipment_id=state["shipment_id"], error=msg)
-        return {"cross_validation": None, "errors": errors}
+    extractions = [ExtractionResult(**e) for e in state.get("extractions", [])]
+    cv = cross_validate(extractions)
+    if extractions:
+        repo.save_cross_validation(cv)  # idempotent save
+    repo.set_shipment_stage(state["shipment_id"], "cross_validated")
+    return {"cross_validation": cv.model_dump(mode="json")}
 
 
 def _router_node(state: PipelineState) -> dict:
-    errors = list(state.get("errors", []))
+    sid = state["shipment_id"]
     validations = [ValidationResult(**v) for v in state.get("validations", [])]
     cv_dict = state.get("cross_validation")
     cross = CrossValidationResult(**cv_dict) if cv_dict else None
     if not validations:
         # Nothing to decide on -> fail loud to human review, never silent-approve.
-        repo.set_shipment_status(state["shipment_id"], "needs_review")
-        errors.append("no validations produced; routed to human review")
-        return {"errors": errors, "decision": None}
-    try:
-        dec = decide(validations, LLMClient(), cross_validation=cross)
-        return {"decision": dec.model_dump(mode="json"), "errors": errors}
-    except Exception as e:  # noqa: BLE001
-        repo.set_shipment_status(state["shipment_id"], "needs_review")
-        errors.append(f"router failed: {type(e).__name__}: {e}")
-        log_event("node_error", node="router", shipment_id=state["shipment_id"], error=errors[-1])
-        return {"errors": errors, "decision": None}
+        repo.set_shipment_status(sid, "needs_review")
+        repo.set_shipment_stage(sid, "failed")
+        return {"decision": None, "errors": state.get("errors", []) + ["no validations; routed to review"]}
+    dec = decide(validations, cross_validation=cross)  # deterministic, idempotent
+    repo.set_shipment_stage(sid, "decided")
+    return {"decision": dec.model_dump(mode="json")}
 
 
 # Graph assembly + checkpointer

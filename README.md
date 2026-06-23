@@ -14,7 +14,7 @@ free tier — one vision-capable model for extraction, decision prose, and NL→
 
 ```
 Extractor  →  Validator  →  Router            (auto-approve / flag / amend)
- (vision)     (rules, code)  (decision in code, reasoning by the LLM)
+ (vision)     (rules, code)  (decision + reasoning + draft, all deterministic)
 ```
 
 ---
@@ -162,10 +162,11 @@ nodes in order: the **Extractor** sends the raw PDF/image to Gemini and gets bac
 Python — auditable, no LLM) checks each field against the customer's rules and
 marks it match / mismatch / **uncertain** (uncertainty always wins, so nothing
 low-confidence is silently approved); the **Router** picks one of three decisions
-*in code* and uses Gemini only to write the human-readable reasoning and, for
-amendments, the draft email. State is checkpointed to SQLite after every node, so
-a crash mid-run can resume without re-paying for extraction. Everything is stored
-and queryable.
+*in code* and writes the reasoning and the draft reply **deterministically** (no
+LLM). The only LLM call in the whole pipeline is the extractor (vision). Each node
+is **idempotent** and records progress in `shipments.stage`, so a failed run is
+re-enqueued and **resumes from where it left off** — extraction is never re-done.
+Everything is stored and queryable.
 
 ---
 

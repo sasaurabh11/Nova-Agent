@@ -14,9 +14,11 @@ from __future__ import annotations
 import queue
 import threading
 import time
+from pathlib import Path
 
 from backend.config import get_config
 from backend.domain.ids import new_id
+from backend.domain.models import DocumentRef
 from backend.email_client import fetch_new_emails
 from backend.ingest.email_inbox import EmailInboxIngestor
 from backend.llm.tracing import log_event
@@ -50,18 +52,52 @@ def ingest_fetched_email(fetched) -> str | None:
     return email_id
 
 
+def _documents_for(email_id: str, shipment_id: str) -> list[DocumentRef]:
+    """Rebuild DocumentRefs for an existing shipment (retry/resume) from its saved
+    attachments — reusing the SAME document_ids so the extractor can skip done docs."""
+    folder = Path(get_config().emails_abspath) / email_id
+    refs: list[DocumentRef] = []
+    for d in repo.get_documents(shipment_id):
+        refs.append(DocumentRef(
+            document_id=d["id"], shipment_id=shipment_id, filename=d["filename"],
+            mime=d["mime"], path=str(folder / d["filename"]), source=d["source"],
+        ))
+    return refs
+
+
 def process_email(email_id: str) -> None:
     em = repo.get_email(email_id)
     if em is None:
         return
-    try:
+    cfg = get_config()
+
+    # Reuse the shipment across retries so document_ids stay stable (enables resume).
+    if em.get("shipment_id"):
+        shipment_id = em["shipment_id"]
+        documents = _documents_for(email_id, shipment_id)
+    else:
         ingested = _ingestor.ingest(email_id, em["customer_id"])
-        repo.set_email_status(email_id, "processing", shipment_id=ingested.shipment_id)
-        run_pipeline(ingested.shipment_id, ingested.documents, em["customer_id"])
+        shipment_id = ingested.shipment_id
+        documents = ingested.documents
+        repo.set_email_status(email_id, "processing", shipment_id=shipment_id)
+
+    attempt = repo.bump_shipment_attempts(shipment_id)
+    try:
+        run_pipeline(shipment_id, documents, em["customer_id"])
         repo.set_email_status(email_id, "verified")
-    except Exception as e:  # noqa: BLE001 — fail loud, keep the worker alive
-        log_event("worker_error", email_id=email_id, error=str(e))
-        repo.set_email_status(email_id, "verified")
+    except Exception as e:  # noqa: BLE001
+        if attempt < cfg.max_pipeline_attempts:
+            repo.set_shipment_stage(shipment_id, "failed")
+            delay = cfg.retry_backoff_s * attempt  # linear backoff
+            log_event("pipeline_retry_scheduled", email_id=email_id, shipment_id=shipment_id,
+                      attempt=attempt, delay_s=delay, error=str(e)[:200])
+            threading.Timer(delay, enqueue_email, args=[email_id]).start()
+        else:
+            repo.set_shipment_status(shipment_id, "needs_review")
+            repo.set_shipment_stage(shipment_id, "failed")
+            repo.set_email_status(email_id, "verified")
+            log_event("pipeline_gave_up", email_id=email_id, shipment_id=shipment_id,
+                      attempts=attempt, error=str(e)[:200])
 
 
 def _worker_loop() -> None:

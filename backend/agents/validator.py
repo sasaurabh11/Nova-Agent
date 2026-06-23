@@ -147,11 +147,6 @@ def _norm(v: str) -> str:
 
 
 def cross_validate(extractions: list[ExtractionResult]) -> CrossValidationResult:
-    """Behaviour (Part 2): check that shipment-level fields (consignee, HS code,
-    ports, Incoterms, invoice no.) AGREE across every document — BOL + Invoice +
-    Packing List. A field that was read (status=found) in 2+ docs with differing
-    values is a conflict. Deterministic, no LLM. Single-doc shipments are
-    trivially consistent."""
     shipment_id = extractions[0].shipment_id if extractions else ""
     conflicts: list[dict] = []
 

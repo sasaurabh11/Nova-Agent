@@ -73,6 +73,66 @@ def set_shipment_status(shipment_id: str, status: str) -> None:
         )
 
 
+def set_shipment_stage(shipment_id: str, stage: str) -> None:
+    """Record how far the pipeline has progressed (queued -> extracted -> validated
+    -> cross_validated -> decided | failed) so a resumed run knows where it is."""
+    with cursor() as cur:
+        cur.execute("UPDATE shipments SET stage=? WHERE id=?", (stage, shipment_id))
+
+
+def bump_shipment_attempts(shipment_id: str) -> int:
+    """Increment and return the attempt counter (for bounded retries)."""
+    with cursor() as cur:
+        cur.execute("UPDATE shipments SET attempts = attempts + 1 WHERE id=?", (shipment_id,))
+        row = cur.execute("SELECT attempts FROM shipments WHERE id=?", (shipment_id,)).fetchone()
+    return row["attempts"] if row else 0
+
+
+def get_documents(shipment_id: str) -> list[dict]:
+    with cursor(read_only=True) as cur:
+        rows = cur.execute(
+            "SELECT * FROM documents WHERE shipment_id=? ORDER BY received_at", (shipment_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# --- idempotency reads (so a resumed run skips work already done) ---------
+def get_extraction_for_document(document_id: str, shipment_id: str) -> Optional[dict]:
+    """Return a previously-saved extraction (as an ExtractionResult-shaped dict)
+    so a re-run reuses it instead of re-calling the vision model. None if absent."""
+    with cursor(read_only=True) as cur:
+        row = cur.execute(
+            "SELECT * FROM extractions WHERE document_id=? ORDER BY created_at DESC LIMIT 1",
+            (document_id,),
+        ).fetchone()
+    if not row:
+        return None
+    payload = json.loads(row["fields_json"])
+    return {
+        "document_id": document_id, "shipment_id": shipment_id,
+        "doc_type": payload.get("doc_type", "unknown"),
+        "fields": payload.get("fields", {}),
+        "warnings": payload.get("warnings", []),
+        "model": row["model"], "latency_ms": row["latency_ms"],
+    }
+
+
+def validation_exists_for_document(document_id: str) -> bool:
+    with cursor(read_only=True) as cur:
+        row = cur.execute(
+            "SELECT 1 FROM validations WHERE document_id=? LIMIT 1", (document_id,)
+        ).fetchone()
+    return row is not None
+
+
+def decision_exists(shipment_id: str) -> bool:
+    with cursor(read_only=True) as cur:
+        row = cur.execute(
+            "SELECT 1 FROM decisions WHERE shipment_id=? LIMIT 1", (shipment_id,)
+        ).fetchone()
+    return row is not None
+
+
 def create_document(
     shipment_id: str, filename: str, mime: str, doc_type: str = "unknown",
     source: str = "upload",
@@ -94,9 +154,10 @@ def set_document_type(document_id: str, doc_type: str) -> None:
         )
 
 
-# --- agent outputs --------------------------------------------------------
+# --- agent outputs (idempotent: delete-then-insert so re-runs don't duplicate) --
 def save_extraction(ext: ExtractionResult) -> None:
     with cursor() as cur:
+        cur.execute("DELETE FROM extractions WHERE document_id=?", (ext.document_id,))
         cur.execute(
             "INSERT INTO extractions(id, document_id, fields_json, model, latency_ms, created_at) "
             "VALUES(?, ?, ?, ?, ?, ?)",
@@ -110,6 +171,7 @@ def save_extraction(ext: ExtractionResult) -> None:
 
 def save_validation(val: ValidationResult) -> None:
     with cursor() as cur:
+        cur.execute("DELETE FROM validations WHERE document_id=?", (val.document_id,))
         cur.execute(
             "INSERT INTO validations(id, document_id, shipment_id, ruleset_id, "
             "results_json, overall_status, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
@@ -276,6 +338,7 @@ def list_emails(limit: int = 50) -> list[dict]:
 
 def save_cross_validation(cv) -> None:
     with cursor() as cur:
+        cur.execute("DELETE FROM cross_validations WHERE shipment_id=?", (cv.shipment_id,))
         cur.execute(
             "INSERT INTO cross_validations(id, shipment_id, consistent, conflicts_json, created_at) "
             "VALUES(?, ?, ?, ?, ?)",

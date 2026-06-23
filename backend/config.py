@@ -55,6 +55,8 @@ class Config:
     imap_search: str         # IMAP SEARCH criteria (blank -> UNSEEN)
     max_fetch_per_poll: int  # cap on emails fetched per poll
     max_total_fetch: int     # hard cap on emails fetched for the whole session
+    max_pipeline_attempts: int  # bounded retries before giving up to needs_review
+    retry_backoff_s: int     # base delay before re-enqueueing a failed shipment
 
     @property
     def db_abspath(self) -> str:
@@ -101,4 +103,6 @@ def get_config() -> Config:
         imap_search=os.getenv("IMAP_SEARCH", ""),
         max_fetch_per_poll=_geti("MAX_FETCH_PER_POLL", 5),
         max_total_fetch=_geti("MAX_TOTAL_FETCH", 5),
+        max_pipeline_attempts=_geti("MAX_PIPELINE_ATTEMPTS", 3),
+        retry_backoff_s=_geti("RETRY_BACKOFF_S", 10),
     )

@@ -908,3 +908,18 @@ pre.sql {
 .node-wait { color: var(--muted); font-size: 13px; padding: 4px 2px; }
 .node .docblock { border-color: var(--line); }
 .node .decision { background: #0c1019; }
+
+/* ===== Discrepancy detail (click a flagged field) ===== */
+tr.clickable { cursor: pointer; }
+tr.clickable:hover { background: rgba(99,102,241,0.08); }
+.disc-detail-row td { background: #0c1019; padding: 0 !important; }
+.disc-detail {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 12px 16px; border-left: 3px solid var(--amber); margin: 4px 8px;
+  border-radius: 0 8px 8px 0; font-size: 13px;
+}
+.disc-detail .dl {
+  display: inline-block; min-width: 110px; color: var(--faint);
+  font-size: 11px; text-transform: uppercase; letter-spacing: .5px; font-weight: 700;
+}
+.disc-detail q { color: #c7d0e0; font-style: italic; }

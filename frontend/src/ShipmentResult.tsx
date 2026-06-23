@@ -39,10 +39,14 @@ export default function ShipmentResult({
   const [subject, setSubject] = useState(reply?.subject ?? "");
   const [body, setBody] = useState(reply?.body ?? "");
   const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState<Record<string, boolean>>({});  // expanded flagged fields
   useEffect(() => {
     setSubject(reply?.subject ?? "");
     setBody(reply?.body ?? "");
   }, [reply?.id, reply?.status]);
+
+  const toggle = (key: string) =>
+    setOpen((o) => ({ ...o, [key]: !o[key] }));
 
   function badge(conf: number, st: string) {
     if (st === "not_found") return "red";
@@ -135,18 +139,46 @@ export default function ShipmentResult({
         <div className="table-wrap">
           <table className="kv">
             <thead>
-              <tr><th>Field</th><th>Found</th><th>Expected</th><th>Status</th><th>Reason</th></tr>
+              <tr><th>Field</th><th>Found</th><th>Expected</th><th>Status</th><th></th></tr>
             </thead>
             <tbody>
-              {d.results.map((r: any) => (
-                <tr key={r.field}>
-                  <td className="fname">{prettyField(r.field)}</td>
-                  <td>{r.found ?? <em className="muted">—</em>}</td>
-                  <td className="muted">{r.expected}</td>
-                  <td><span className={`tag ${r.status}`}>{r.status}</span></td>
-                  <td className="reason">{r.reason}</td>
-                </tr>
-              ))}
+              {d.results.map((r: any) => {
+                const flagged = r.status !== "match";
+                const key = `${i}:${r.field}`;
+                const f = d.fields[r.field] ?? {};
+                return [
+                  <tr
+                    key={key}
+                    className={flagged ? "clickable" : ""}
+                    onClick={() => flagged && toggle(key)}
+                  >
+                    <td className="fname">{prettyField(r.field)}</td>
+                    <td>{r.found ?? <em className="muted">—</em>}</td>
+                    <td className="muted">{r.expected}</td>
+                    <td><span className={`tag ${r.status}`}>{r.status}</span></td>
+                    <td className="muted">{flagged ? (open[key] ? "▾" : "▸ details") : ""}</td>
+                  </tr>,
+                  flagged && open[key] ? (
+                    <tr key={key + ":d"} className="disc-detail-row">
+                      <td colSpan={5}>
+                        <div className="disc-detail">
+                          <div><span className="dl">Found</span> {r.found ?? "— (not found)"}</div>
+                          <div><span className="dl">Expected</span> {r.expected}</div>
+                          <div><span className="dl">Why</span> {r.reason}</div>
+                          <div><span className="dl">Source snippet</span>{" "}
+                            {f.source_snippet ? <q>{f.source_snippet}</q> : <em className="muted">not present in document</em>}
+                          </div>
+                          <div><span className="dl">Confidence</span>{" "}
+                            <span className={`pill ${badge(f.confidence ?? 0, f.status)}`}>
+                              {Math.round((f.confidence ?? 0) * 100)}%
+                            </span>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : null,
+                ];
+              })}
             </tbody>
           </table>
         </div>

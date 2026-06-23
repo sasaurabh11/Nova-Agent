@@ -49,7 +49,12 @@ Tables (read-only):
     decision in: auto_approve, flag_for_review, request_amendment
   agent_runs(id, shipment_id, agent, model, tokens_in, tokens_out, cost_usd, latency_ms, status, created_at)
 Join shipments.customer_id = customers.id for customer names.
-Use SQLite date funcs, e.g. created_at >= datetime('now','-7 days') for "this week".
+Customer names are full legal names (e.g. 'ACME Imports GmbH'); when the user names a
+customer, match PARTIALLY and case-insensitively: customers.name LIKE '%ACME%'.
+"pending review" / "awaiting review" -> shipments.status = 'needs_review'.
+"awaiting amendment" / "needs fixing" -> shipments.status = 'amendment_requested'.
+Select only the columns asked for (avoid SELECT *). Use SQLite date funcs, e.g.
+created_at >= datetime('now','-7 days') for "this week".
 """
 
 

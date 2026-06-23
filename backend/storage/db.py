@@ -23,8 +23,10 @@ CREATE TABLE IF NOT EXISTS rulesets (
 CREATE TABLE IF NOT EXISTS shipments (
     id          TEXT PRIMARY KEY,
     customer_id TEXT NOT NULL REFERENCES customers(id),
-    status      TEXT NOT NULL,   -- processing | approved | needs_review | amendment_requested
-    source      TEXT NOT NULL,   -- upload | email (email reserved for Part 2)
+    status      TEXT NOT NULL,   -- processing | approved | needs_review | amendment_requested | replied
+    stage       TEXT NOT NULL DEFAULT 'queued',  -- queued|extracted|validated|cross_validated|decided|failed
+    attempts    INTEGER NOT NULL DEFAULT 0,       -- pipeline attempts (for bounded retry)
+    source      TEXT NOT NULL,   -- upload | email
     created_at  TEXT NOT NULL
 );
 
