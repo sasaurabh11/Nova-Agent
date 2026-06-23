@@ -211,3 +211,133 @@ def list_shipments(limit: int = 50) -> list[dict]:
             (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+def create_email(email_id: str, customer_id: str, sender: str, subject: str,
+                 message_id: Optional[str] = None) -> None:
+    with cursor() as cur:
+        cur.execute(
+            "INSERT OR IGNORE INTO emails(id, customer_id, sender, subject, message_id, "
+            "status, received_at) VALUES(?, ?, ?, ?, ?, 'received', ?)",
+            (email_id, customer_id, sender, subject, message_id, now_iso()),
+        )
+
+
+def get_email(email_id: str) -> Optional[dict]:
+    with cursor(read_only=True) as cur:
+        row = cur.execute("SELECT * FROM emails WHERE id=?", (email_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_email_by_message_id(message_id: str) -> Optional[dict]:
+    with cursor(read_only=True) as cur:
+        row = cur.execute(
+            "SELECT * FROM emails WHERE message_id=? LIMIT 1", (message_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_pending_emails() -> list[dict]:
+    """Emails not yet finished — used to re-enqueue after a restart."""
+    with cursor(read_only=True) as cur:
+        rows = cur.execute(
+            "SELECT * FROM emails WHERE status IN ('received','processing') "
+            "ORDER BY received_at"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_email_status(email_id: str, status: str, shipment_id: Optional[str] = None) -> None:
+    with cursor() as cur:
+        if shipment_id is not None:
+            cur.execute("UPDATE emails SET status=?, shipment_id=? WHERE id=?",
+                        (status, shipment_id, email_id))
+        else:
+            cur.execute("UPDATE emails SET status=? WHERE id=?", (status, email_id))
+
+
+def get_email_by_shipment(shipment_id: str) -> Optional[dict]:
+    with cursor(read_only=True) as cur:
+        row = cur.execute(
+            "SELECT * FROM emails WHERE shipment_id=? LIMIT 1", (shipment_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_emails(limit: int = 50) -> list[dict]:
+    with cursor(read_only=True) as cur:
+        rows = cur.execute(
+            "SELECT e.*, c.name AS customer_name FROM emails e "
+            "JOIN customers c ON c.id=e.customer_id "
+            "ORDER BY e.received_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def save_cross_validation(cv) -> None:
+    with cursor() as cur:
+        cur.execute(
+            "INSERT INTO cross_validations(id, shipment_id, consistent, conflicts_json, created_at) "
+            "VALUES(?, ?, ?, ?, ?)",
+            (new_id("cv"), cv.shipment_id, int(cv.consistent),
+             json.dumps(cv.conflicts), now_iso()),
+        )
+
+
+def get_cross_validation(shipment_id: str) -> Optional[dict]:
+    with cursor(read_only=True) as cur:
+        row = cur.execute(
+            "SELECT * FROM cross_validations WHERE shipment_id=? ORDER BY created_at DESC LIMIT 1",
+            (shipment_id,),
+        ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["consistent"] = bool(d["consistent"])
+    d["conflicts"] = json.loads(d.pop("conflicts_json"))
+    return d
+
+
+def save_reply(reply) -> None:
+    with cursor() as cur:
+        cur.execute(
+            "INSERT INTO replies(id, shipment_id, email_id, kind, subject, body, status, sent_at, created_at) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (reply.id, reply.shipment_id, reply.email_id, reply.kind.value,
+             reply.subject, reply.body, reply.status.value, reply.sent_at, now_iso()),
+        )
+
+
+def get_reply_for_shipment(shipment_id: str) -> Optional[dict]:
+    with cursor(read_only=True) as cur:
+        row = cur.execute(
+            "SELECT * FROM replies WHERE shipment_id=? ORDER BY created_at DESC LIMIT 1",
+            (shipment_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_reply(reply_id: str) -> Optional[dict]:
+    with cursor(read_only=True) as cur:
+        row = cur.execute("SELECT * FROM replies WHERE id=?", (reply_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def update_reply_body(reply_id: str, subject: str, body: str) -> None:
+    with cursor() as cur:
+        cur.execute("UPDATE replies SET subject=?, body=? WHERE id=? AND status='draft'",
+                    (subject, body, reply_id))
+
+
+def mark_reply_sent(reply_id: str) -> Optional[dict]:
+    """Record that CG clicked send. Does NOT actually email anyone."""
+    with cursor() as cur:
+        cur.execute("UPDATE replies SET status='sent', sent_at=? WHERE id=?",
+                    (now_iso(), reply_id))
+        row = cur.execute("SELECT * FROM replies WHERE id=?", (reply_id,)).fetchone()
+        if row:
+            cur.execute("UPDATE shipments SET status='replied' WHERE id=?",
+                        (row["shipment_id"],))
+            cur.execute("UPDATE emails SET status='replied' WHERE shipment_id=?",
+                        (row["shipment_id"],))
+    return dict(row) if row else None

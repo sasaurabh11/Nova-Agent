@@ -82,6 +82,41 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     created_at  TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS emails (
+    id          TEXT PRIMARY KEY,
+    customer_id TEXT NOT NULL REFERENCES customers(id),
+    sender      TEXT NOT NULL,       -- the SU address
+    subject     TEXT NOT NULL,
+    message_id  TEXT,                -- IMAP Message-ID
+    status      TEXT NOT NULL,       -- received | processing | verified | replied
+    shipment_id TEXT REFERENCES shipments(id),
+    received_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cross_validations (
+    id            TEXT PRIMARY KEY,
+    shipment_id   TEXT NOT NULL REFERENCES shipments(id),
+    consistent    INTEGER NOT NULL,
+    conflicts_json TEXT NOT NULL,
+    created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS replies (
+    id          TEXT PRIMARY KEY,
+    shipment_id TEXT NOT NULL REFERENCES shipments(id),
+    email_id    TEXT REFERENCES emails(id),
+    kind        TEXT NOT NULL,       -- approval | amendment | review
+    subject     TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    status      TEXT NOT NULL,       -- draft | sent
+    sent_at     TEXT,
+    created_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_emails_status        ON emails(status);
+CREATE INDEX IF NOT EXISTS idx_emails_message        ON emails(message_id);
+CREATE INDEX IF NOT EXISTS idx_crossval_shipment    ON cross_validations(shipment_id);
+CREATE INDEX IF NOT EXISTS idx_replies_shipment     ON replies(shipment_id);
 CREATE INDEX IF NOT EXISTS idx_documents_shipment   ON documents(shipment_id);
 CREATE INDEX IF NOT EXISTS idx_extractions_document ON extractions(document_id);
 CREATE INDEX IF NOT EXISTS idx_validations_shipment ON validations(shipment_id);
@@ -101,6 +136,9 @@ def connect(read_only: bool = False) -> sqlite3.Connection:
         conn = sqlite3.connect(cfg.db_abspath, check_same_thread=False)
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.execute("PRAGMA journal_mode = WAL;")
+    # WHY: the watcher writes while the API reads concurrently — wait up to 5s for
+    # the lock instead of erroring with "database is locked".
+    conn.execute("PRAGMA busy_timeout = 5000;")
     conn.row_factory = sqlite3.Row
     return conn
 

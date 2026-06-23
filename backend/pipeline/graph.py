@@ -8,10 +8,14 @@ from langgraph.graph import END, START, StateGraph
 
 from backend.agents.extractor import extract_document
 from backend.agents.router import decide
-from backend.agents.validator import validate_extraction
+from backend.agents.validator import cross_validate, validate_extraction
 from backend.config import get_config
 from backend.domain.models import DocumentRef
-from backend.domain.schemas import ExtractionResult, ValidationResult
+from backend.domain.schemas import (
+    CrossValidationResult,
+    ExtractionResult,
+    ValidationResult,
+)
 from backend.llm.client import LLMClient
 from backend.llm.tracing import log_event
 from backend.pipeline.state import PipelineState, doc_from_dict, doc_to_dict
@@ -53,16 +57,34 @@ def _validator_node(state: PipelineState) -> dict:
     return {"validations": validations, "errors": errors}
 
 
+def _cross_validator_node(state: PipelineState) -> dict:
+    errors = list(state.get("errors", []))
+    try:
+        extractions = [ExtractionResult(**e) for e in state.get("extractions", [])]
+        cv = cross_validate(extractions)
+        if extractions:
+            repo.save_cross_validation(cv)
+        return {"cross_validation": cv.model_dump(mode="json"), "errors": errors}
+    except Exception as exc:  # noqa: BLE001
+        msg = f"cross-validator failed: {type(exc).__name__}: {exc}"
+        errors.append(msg)
+        log_event("node_error", node="cross_validator",
+                  shipment_id=state["shipment_id"], error=msg)
+        return {"cross_validation": None, "errors": errors}
+
+
 def _router_node(state: PipelineState) -> dict:
     errors = list(state.get("errors", []))
     validations = [ValidationResult(**v) for v in state.get("validations", [])]
+    cv_dict = state.get("cross_validation")
+    cross = CrossValidationResult(**cv_dict) if cv_dict else None
     if not validations:
         # Nothing to decide on -> fail loud to human review, never silent-approve.
         repo.set_shipment_status(state["shipment_id"], "needs_review")
         errors.append("no validations produced; routed to human review")
         return {"errors": errors, "decision": None}
     try:
-        dec = decide(validations, LLMClient())
+        dec = decide(validations, LLMClient(), cross_validation=cross)
         return {"decision": dec.model_dump(mode="json"), "errors": errors}
     except Exception as e:  # noqa: BLE001
         repo.set_shipment_status(state["shipment_id"], "needs_review")
@@ -76,10 +98,12 @@ def _build_graph(checkpointer: Optional[SqliteSaver]):
     g = StateGraph(PipelineState)
     g.add_node("extractor", _extractor_node)
     g.add_node("validator", _validator_node)
+    g.add_node("cross_validator", _cross_validator_node)
     g.add_node("router", _router_node)
     g.add_edge(START, "extractor")
     g.add_edge("extractor", "validator")
-    g.add_edge("validator", "router")
+    g.add_edge("validator", "cross_validator")
+    g.add_edge("cross_validator", "router")
     g.add_edge("router", END)
     return g.compile(checkpointer=checkpointer)
 
@@ -115,6 +139,7 @@ def run_pipeline(
             "documents": [doc_to_dict(d) for d in documents],
             "extractions": [],
             "validations": [],
+            "cross_validation": None,
             "decision": None,
             "errors": [],
         }

@@ -1,37 +1,45 @@
+// Thin API client. Base URL overridable via VITE_API_BASE.
 const BASE = (import.meta as any).env?.VITE_API_BASE ?? "http://localhost:8099";
 
-export async function getHealth() {
-  return (await fetch(`${BASE}/health`)).json();
+async function j(res: Response) {
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
 }
 
-export async function getCustomers() {
-  return (await fetch(`${BASE}/customers`)).json();
-}
+export const getHealth = () => fetch(`${BASE}/health`).then(j);
+export const getCustomers = () => fetch(`${BASE}/customers`).then(j);
 
-export async function uploadShipment(
-  customerId: string,
-  files: FileList,
-): Promise<{ shipment_id: string }> {
+export async function uploadShipment(customerId: string, files: FileList) {
   const fd = new FormData();
   fd.append("customer_id", customerId);
   Array.from(files).forEach((f) => fd.append("files", f));
-  const res = await fetch(`${BASE}/shipments`, { method: "POST", body: fd });
-  if (!res.ok) throw new Error(`upload failed: ${res.status}`);
-  
-  return res.json();
+  return fetch(`${BASE}/shipments`, { method: "POST", body: fd }).then(j);
 }
-
-export async function getShipment(id: string) {
-  const res = await fetch(`${BASE}/shipments/${id}`);
-  if (!res.ok) throw new Error("shipment not found");
-  return res.json();
-}
-
-export async function runQuery(question: string) {
-  const res = await fetch(`${BASE}/query`, {
+export const getShipment = (id: string) => fetch(`${BASE}/shipments/${id}`).then(j);
+export const runQuery = (question: string) =>
+  fetch(`${BASE}/query`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ question }),
-  });
-  return res.json();
+  }).then(j);
+
+export const getInbox = () => fetch(`${BASE}/inbox`).then(j);
+export const getEmail = (id: string) => fetch(`${BASE}/inbox/${id}`).then(j);
+
+export async function dropEmail(sender: string, subject: string, files: FileList) {
+  const fd = new FormData();
+  fd.append("sender", sender);
+  fd.append("subject", subject);
+  Array.from(files).forEach((f) => fd.append("files", f));
+  return fetch(`${BASE}/inbox/emails`, { method: "POST", body: fd }).then(j);
 }
+
+export const editReply = (id: string, subject: string, body: string) =>
+  fetch(`${BASE}/replies/${id}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ subject, body }),
+  }).then(j);
+
+export const sendReply = (id: string) =>
+  fetch(`${BASE}/replies/${id}/send`, { method: "POST" }).then(j);

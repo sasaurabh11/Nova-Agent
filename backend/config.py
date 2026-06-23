@@ -42,6 +42,19 @@ class Config:
     llm_timeout_s: int
     shipment_budget_s: int
     db_path: str
+    imap_host: str
+    imap_port: int
+    imap_folder: str
+    email_user: str
+    email_password: str
+    smtp_host: str
+    smtp_port: int
+    default_customer_id: str
+    emails_dir: str          # where fetched attachments are stored
+    poll_interval_s: int     # how often to poll IMAP for new mail
+    imap_search: str         # IMAP SEARCH criteria (blank -> UNSEEN)
+    max_fetch_per_poll: int  # cap on emails fetched per poll
+    max_total_fetch: int     # hard cap on emails fetched for the whole session
 
     @property
     def db_abspath(self) -> str:
@@ -50,6 +63,18 @@ class Config:
             p = _REPO_ROOT / p
         p.parent.mkdir(parents=True, exist_ok=True)
         return str(p)
+
+    @property
+    def emails_abspath(self) -> str:
+        p = Path(self.emails_dir)
+        if not p.is_absolute():
+            p = _REPO_ROOT / p
+        p.mkdir(parents=True, exist_ok=True)
+        return str(p)
+
+    @property
+    def email_configured(self) -> bool:
+        return bool(self.email_user and self.email_password)
 
 
 @lru_cache(maxsize=1)
@@ -63,4 +88,17 @@ def get_config() -> Config:
         llm_timeout_s=_geti("LLM_TIMEOUT_S", 60),
         shipment_budget_s=_geti("SHIPMENT_BUDGET_S", 180),
         db_path=os.getenv("DB_PATH", "./data/nova.db"),
+        imap_host=os.getenv("IMAP_HOST", "imap.gmail.com"),
+        imap_port=_geti("IMAP_PORT", 993),
+        imap_folder=os.getenv("IMAP_FOLDER", "INBOX"),
+        email_user=os.getenv("EMAIL_USER", ""),
+        email_password=os.getenv("EMAIL_PASSWORD", ""),
+        smtp_host=os.getenv("SMTP_HOST", "smtp.gmail.com"),
+        smtp_port=_geti("SMTP_PORT", 587),
+        default_customer_id=os.getenv("DEFAULT_CUSTOMER_ID", "cust_acme"),
+        emails_dir=os.getenv("EMAILS_DIR", "./data/emails"),
+        poll_interval_s=_geti("POLL_INTERVAL_S", 15),
+        imap_search=os.getenv("IMAP_SEARCH", ""),
+        max_fetch_per_poll=_geti("MAX_FETCH_PER_POLL", 5),
+        max_total_fetch=_geti("MAX_TOTAL_FETCH", 5),
     )

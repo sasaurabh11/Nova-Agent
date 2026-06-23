@@ -12,6 +12,7 @@ class PipelineState(TypedDict, total=False):
     documents: list[dict]      # serialised DocumentRef (1+; Part 1 passes 1)
     extractions: list[dict]    # serialised ExtractionResult
     validations: list[dict]    # serialised ValidationResult
+    cross_validation: Optional[dict]  # serialised CrossValidationResult (Part 2)
     decision: Optional[dict]   # serialised DecisionResult
     errors: list[str]
 

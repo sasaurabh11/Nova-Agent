@@ -17,6 +17,7 @@ import re
 
 from backend.config import get_config
 from backend.domain.schemas import (
+    CrossConflict,
     CrossValidationResult,
     ExtractionResult,
     FieldStatus,
@@ -25,6 +26,13 @@ from backend.domain.schemas import (
     OverallStatus,
     ValidationResult,
     ValidationSummary,
+)
+
+# Fields that must be IDENTICAL across every document in a shipment. (Excludes
+# description_of_goods / gross_weight, which legitimately differ in wording.)
+CROSS_FIELDS = (
+    "consignee_name", "hs_code", "port_of_loading",
+    "port_of_discharge", "incoterms", "invoice_number",
 )
 from backend.llm.tracing import log_event
 from backend.storage import repo
@@ -134,9 +142,40 @@ def validate_extraction(ext: ExtractionResult, ruleset: dict) -> ValidationResul
     return result
 
 
-def cross_validate(shipment_extractions: list[ExtractionResult]) -> CrossValidationResult:
-    """ check consignee / HS code consistency ACROSS a shipment's docs
-    (BOL + Invoice + Packing List). The Shipment->Documents data model and the
-    list-based pipeline state already support this; only the comparison logic
-    is deferred. Leaving the door open, not walking through it."""
-    raise NotImplementedError("Cross-document validation is a Part 2 feature.")
+def _norm(v: str) -> str:
+    return " ".join(str(v).strip().lower().split())
+
+
+def cross_validate(extractions: list[ExtractionResult]) -> CrossValidationResult:
+    """Behaviour (Part 2): check that shipment-level fields (consignee, HS code,
+    ports, Incoterms, invoice no.) AGREE across every document — BOL + Invoice +
+    Packing List. A field that was read (status=found) in 2+ docs with differing
+    values is a conflict. Deterministic, no LLM. Single-doc shipments are
+    trivially consistent."""
+    shipment_id = extractions[0].shipment_id if extractions else ""
+    conflicts: list[dict] = []
+
+    if len(extractions) >= 2:
+        for field in CROSS_FIELDS:
+            seen: list[tuple[str, str]] = []  # (normalised, raw) per doc that found it
+            rows: list[dict] = []
+            for ext in extractions:
+                ef = ext.fields.get(field)
+                if ef and ef.status == FieldStatus.found and ef.value:
+                    seen.append((_norm(ef.value), ef.value))
+                    rows.append({"doc_type": ext.doc_type,
+                                 "document_id": ext.document_id,
+                                 "value": ef.value})
+            # conflict only if 2+ docs reported it AND they disagree
+            if len({n for n, _ in seen}) > 1:
+                conflicts.append(CrossConflict(field=field, values=rows).model_dump())
+
+    result = CrossValidationResult(
+        shipment_id=shipment_id,
+        consistent=(len(conflicts) == 0),
+        conflicts=conflicts,
+    )
+    log_event("cross_validation_done", shipment_id=shipment_id,
+              docs=len(extractions), consistent=result.consistent,
+              conflicts=len(conflicts))
+    return result

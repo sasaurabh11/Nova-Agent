@@ -110,9 +110,14 @@ class LLMClient:
             )
             instruction = {
                 "router_reasoning": "Write 1-3 sentences explaining the decision, naming "
-                "the specific fields that drove it (with found vs expected).",
-                "amendment_body": "Write a polite amendment-request email body listing each "
-                "discrepancy as a numbered item: field, what the doc shows, what is required.",
+                "the specific fields that drove it (with found vs expected). If "
+                "cross_document_conflict is true, say the documents disagree with each other.",
+                "amendment_body": "Write a polite amendment-request email body to the supplier "
+                "listing each discrepancy as a numbered item: field, what the doc shows, what "
+                "is required. If a discrepancy says values differ across documents, ask them "
+                "to make the documents consistent.",
+                "approval_body": "Write a short, professional email body to the supplier "
+                "confirming the documents passed validation and are approved. No action needed.",
             }[task]
             prompt = f"{instruction}\n\nFACTS (JSON):\n{json.dumps(facts, indent=2)}"
 

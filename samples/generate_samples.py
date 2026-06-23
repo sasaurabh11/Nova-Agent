@@ -17,6 +17,7 @@ from reportlab.pdfgen import canvas
 ROOT = Path(__file__).resolve().parent
 CLEAN = ROOT / "clean"
 MESSY = ROOT / "messy"
+EMAILS = ROOT / "emails"   # Part 2: SU email bundles (multi-doc shipments)
 
 FIELD_LABELS = {
     "consignee_name": "Consignee",
@@ -54,6 +55,11 @@ INCOMPLETE_INVOICE = {
     k: v for k, v in CLEAN_INVOICE.items()
     if k not in ("gross_weight", "invoice_number")
 }
+# Part 2 multi-doc shipment: a packing list consistent with the invoice/BOL.
+PACKING_LIST = {**CLEAN_INVOICE, "description_of_goods": "Laptops — 120 cartons (10 units/carton)"}
+# Each doc is individually VALID, but this BOL's HS code disagrees with the invoice's
+# (8471.30) — a cross-document conflict that only multi-doc validation can catch.
+CONFLICT_BOL = {**CLEAN_BOL, "hs_code": "8528.51"}
 
 
 def _draw(c: canvas.Canvas, title: str, values: dict) -> None:
@@ -107,6 +113,15 @@ def degrade_to_png(pdf_bytes: bytes) -> bytes:
     return out2.getvalue()
 
 
+def write_bundle(name: str, subject: str, docs: list[tuple[str, bytes]]) -> None:
+    """Write one SU shipment's documents — the set you attach to a test email (or
+    feed via POST /inbox/emails) to trigger the pipeline."""
+    d = EMAILS / name
+    d.mkdir(parents=True, exist_ok=True)
+    for filename, data in docs:
+        (d / filename).write_bytes(data)
+
+
 def main() -> None:
     CLEAN.mkdir(parents=True, exist_ok=True)
     MESSY.mkdir(parents=True, exist_ok=True)
@@ -118,9 +133,25 @@ def main() -> None:
     (CLEAN / "commercial_invoice_incomplete.pdf").write_bytes(make_pdf(INCOMPLETE_INVOICE, "COMMERCIAL INVOICE"))
     (MESSY / "commercial_invoice_scan.png").write_bytes(degrade_to_png(inv))
 
-    print("Generated 4 sample documents:")
+    # Part 2: multi-document SU email bundles.
+    write_bundle("clean_shipment", "Shipment ACME-1001 — documents for approval", [
+        ("commercial_invoice.pdf", make_pdf(CLEAN_INVOICE, "COMMERCIAL INVOICE")),
+        ("bill_of_lading.pdf", make_pdf(CLEAN_BOL, "BILL OF LADING")),
+        ("packing_list.pdf", make_pdf(PACKING_LIST, "PACKING LIST")),
+    ])
+    write_bundle("conflict_shipment", "Shipment ACME-1002 — documents for approval", [
+        ("commercial_invoice.pdf", make_pdf(CLEAN_INVOICE, "COMMERCIAL INVOICE")),   # HS 8471.30
+        ("bill_of_lading.pdf", make_pdf(CONFLICT_BOL, "BILL OF LADING")),            # HS 8528.51 (conflict)
+        ("packing_list.pdf", make_pdf(PACKING_LIST, "PACKING LIST")),
+    ])
+
+    print("Generated sample documents:")
     for p in sorted(CLEAN.glob("*.pdf")) + sorted(MESSY.glob("*.png")):
         print(f"  - {p.relative_to(ROOT.parent)}")
+    print("Generated Part 2 email bundles:")
+    for d in sorted(EMAILS.iterdir()):
+        if d.is_dir():
+            print(f"  - {d.relative_to(ROOT.parent)}/  ({len(list(d.glob('*.pdf')))} docs)")
 
 
 if __name__ == "__main__":

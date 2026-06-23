@@ -2,7 +2,7 @@ PY  := .venv/bin/python
 PIP := .venv/bin/pip
 PYBIN := $(shell command -v python3.11 || command -v python3)
 
-.PHONY: setup seed run-api run-ui build-ui demo clean
+.PHONY: setup seed run-api run-ui build-ui demo run-watcher clean
 
 setup:                ## create venv, install backend + frontend deps, make .env
 	$(PYBIN) -m venv .venv
@@ -29,5 +29,8 @@ demo:                 ## run the real pipeline on all 3 sample docs via the CLI
 	$(PY) -m backend.cli run samples/messy/commercial_invoice_scan.png
 	$(PY) -m backend.cli query "how many shipments were flagged for review this week?"
 
-clean:                ## remove DB, uploads, samples, build artifacts
-	rm -rf data/*.db data/*.db-* data/uploads samples/clean/*.pdf samples/messy/*.png frontend/dist
+run-watcher:          ## (Part 2) run the IMAP poller + worker standalone (also auto-starts with run-api)
+	$(PY) -m backend.watcher
+
+clean:                ## remove DB, uploads, fetched email attachments, samples, build artifacts
+	rm -rf data/*.db data/*.db-* data/uploads data/emails samples/clean/*.pdf samples/messy/*.png frontend/dist

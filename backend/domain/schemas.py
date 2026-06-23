@@ -132,3 +132,51 @@ class QueryAnswer(BaseModel):
     rows: list[dict] = Field(default_factory=list)
     grounded: bool = True
     error: Optional[str] = None
+
+
+class CrossConflict(BaseModel):
+    """One field that disagrees across a shipment's documents."""
+    field: str
+    values: list[dict]   # [{"doc_type": "...", "filename": "...", "value": "..."}]
+
+
+class ReplyKind(str, Enum):
+    approval = "approval"
+    amendment = "amendment"
+    review = "review"
+
+
+class ReplyStatus(str, Enum):
+    draft = "draft"
+    sent = "sent"
+
+
+class Reply(BaseModel):
+    """The CG-facing draft reply to the supplier. Editable; CG clicks send.
+    The agent NEVER sends on its own."""
+    id: str
+    shipment_id: str
+    email_id: Optional[str] = None
+    kind: ReplyKind
+    subject: str
+    body: str
+    status: ReplyStatus = ReplyStatus.draft
+    sent_at: Optional[str] = None
+
+
+class EmailStatus(str, Enum):
+    received = "received"      # in the inbox, not yet processed
+    processing = "processing"  # the pipeline is running
+    verified = "verified"      # processed; a draft reply is ready for CG
+    replied = "replied"        # CG sent the reply
+
+
+class Email(BaseModel):
+    """A simulated inbound SU email (the trigger)."""
+    id: str
+    customer_id: str
+    sender: str
+    subject: str
+    status: EmailStatus
+    shipment_id: Optional[str] = None
+    received_at: str
