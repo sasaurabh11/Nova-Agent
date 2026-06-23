@@ -127,7 +127,72 @@ make demo
 - `how many shipments were approved?`
 
 Unsafe input (e.g. `DELETE …`, multiple statements, non-whitelisted tables) is
-**refused**, not executed.
+**refused**, not executed. The NL→SQL is validated with a real SQL parser
+(`sqlglot`) + an `EXPLAIN` dry-run, and self-corrects (feeds the error back to the
+model) for up to 2 rounds.
+
+---
+
+## Part 2 — Real email workflow (CG inbox)
+
+Part 2 wires the **same** pipeline into a real Cargo-Control (CG) email loop: a
+supplier (SU) emails trade documents → Nova fetches them, runs the pipeline, and
+hands CG a verification result + a draft reply to review and send. The agents are
+unchanged — only the **trigger** is new.
+
+**What it adds**
+- **Real email trigger (IMAP + SMTP).** A background poller watches the mailbox;
+  when a new email with attachments arrives it fetches it, saves the attachments,
+  and enqueues it. An in-process **queue + worker** run the pipeline. Replies go
+  out over SMTP — but only when CG clicks send.
+- **Multi-document shipments.** One email with several attachments (BOL + Invoice
+  + Packing List) becomes one shipment with N documents.
+- **Cross-document validation.** Shipment-level fields (consignee, HS code, ports,
+  Incoterms, invoice no.) must agree **across all documents**; a disagreement →
+  amendment. (See the `conflict_shipment` sample.)
+- **CG draft reply.** The Router drafts an approval / amendment / review email
+  **deterministically**; CG edits and clicks **Send**. **The agent never sends on
+  its own.**
+- **Resilient & resumable.** Each node is **idempotent** and records progress in
+  `shipments.stage`; a failed run is **re-enqueued (bounded retries)** and
+  **resumes from where it left off** — already-extracted documents are reused, so
+  the vision model is never re-paid.
+
+**Enable real email** (optional — the app runs fully without it). In `.env` set:
+```
+EMAIL_USER=you@gmail.com        # the CG mailbox
+EMAIL_PASSWORD=<app password>   # Gmail App Password (2FA on) — not your login
+```
+IMAP/SMTP hosts default to Gmail (override `IMAP_HOST`/`SMTP_HOST` for others). The
+poller starts automatically with `make run-api`; you can also run it standalone
+with `make run-watcher`. It captures a **baseline at startup**, so it **ignores
+your existing backlog and only processes mail that arrives after it starts**, and
+it polls continuously (`POLL_INTERVAL_S`, default 30s; `MAX_FETCH_PER_POLL` bounds
+each batch; `IMAP_SEARCH` can target a subject, e.g. `(UNSEEN SUBJECT "shipment")`).
+
+**Use the CG Inbox** — the **📥 CG Inbox** tab in the UI shows the four states:
+1. **Incoming** — a new email is being processed.
+2. **Verification result** — per-document, per-field: match / mismatch / uncertain + confidence.
+3. **Discrepancy detail** — *click a flagged field* → found vs expected + the source snippet.
+4. **Draft reply** — the editable email; CG reviews and sends.
+
+**No mailbox? Test it instantly:** in the CG Inbox tab click **+ Simulate**, attach
+the 3 docs in `samples/emails/conflict_shipment/` (an HS-code conflict across docs)
+or `samples/emails/clean_shipment/`, and watch it flow through the same queue →
+worker → pipeline to a draft reply.
+
+---
+
+## Testing
+
+One command runs the full functional test suite — it seeds a clean DB and asserts
+**every behaviour**: SQL guardrails, cross-document validation, bounded retry,
+resume/idempotency, the three decision branches, the multi-doc conflict, router
+determinism (no LLM in the decision), and the query layer:
+```bash
+make test
+```
+The non-LLM checks run without a key; the LLM checks use `LLM_API_KEY`.
 
 ---
 
@@ -135,19 +200,23 @@ Unsafe input (e.g. `DELETE …`, multiple statements, non-whitelisted tables) is
 
 ```
 backend/
-  config.py            env, model id, thresholds, price table
+  config.py            env, model id, thresholds, email (IMAP/SMTP), retry bounds
   domain/schemas.py    the JSON contracts between agents (pydantic)
-  llm/client.py        Gemini client: extract (vision) / compose / nl_to_sql
+  llm/client.py        Gemini client: extract (vision) / nl_to_sql / fix_sql
   llm/tracing.py       wraps every call -> agent_runs (tokens, cost, latency)
   agents/extractor.py  vision -> fields + confidence (3 anti-hallucination layers)
-  agents/validator.py  rules -> match/mismatch/uncertain (+ cross_validate stub)
-  agents/router.py     decision (in code) + reasoning/draft (LLM)
-  pipeline/graph.py    LangGraph extract->validate->route + SqliteSaver + run_pipeline()
-  storage/db.py        SQLite schema       storage/query.py  NL -> guardrailed SELECT
-  app.py               FastAPI (thin layer over run_pipeline)   cli.py  headless runner
-  ingest/base.py       Ingestor interface  <-- Part 2 email-trigger seam
-frontend/              single-page React UI (Vite + TypeScript)
-samples/               generated documents + ACME ruleset (customer_acme.json)
+  agents/validator.py  per-doc rules -> match/mismatch/uncertain + cross_validate()
+  agents/router.py     decision + reasoning + draft reply — fully deterministic (no LLM)
+  pipeline/graph.py    LangGraph extract->validate->cross-validate->route (idempotent)
+  storage/db.py        SQLite schema   storage/query.py  NL -> sqlglot+EXPLAIN guarded SELECT
+  app.py               FastAPI (pipeline + /inbox + reply endpoints)   cli.py  headless runner
+  email_client.py      real IMAP fetch (UID baseline) + SMTP send         <-- Part 2
+  watcher.py           IMAP poller -> in-process queue -> worker (+ retry)  <-- Part 2
+  ingest/email_inbox.py  email attachments -> multi-doc shipment           <-- Part 2
+  ingest/upload.py / base.py   upload ingestor + interface
+frontend/src/          React UI: App (tabs) · InboxView (CG inbox) · ShipmentResult (nodes)
+samples/               generated docs, ACME ruleset, + emails/ (multi-doc bundles)
+scripts/test_all.py    full functional test suite (make test)
 docs/                  PRD.md, TECHNICAL_WRITEUP.md
 ```
 
@@ -155,18 +224,19 @@ docs/                  PRD.md, TECHNICAL_WRITEUP.md
 
 ## How it works (in one paragraph)
 
-A trigger (the UI upload, the CLI) persists a
-**shipment + its documents**, then calls `run_pipeline()`. LangGraph runs three
-nodes in order: the **Extractor** sends the raw PDF/image to Gemini and gets back
-8 fields each with a confidence and source snippet; the **Validator** (pure
-Python — auditable, no LLM) checks each field against the customer's rules and
-marks it match / mismatch / **uncertain** (uncertainty always wins, so nothing
-low-confidence is silently approved); the **Router** picks one of three decisions
-*in code* and writes the reasoning and the draft reply **deterministically** (no
-LLM). The only LLM call in the whole pipeline is the extractor (vision). Each node
-is **idempotent** and records progress in `shipments.stage`, so a failed run is
-re-enqueued and **resumes from where it left off** — extraction is never re-done.
-Everything is stored and queryable.
+A trigger — a UI upload, the CLI, or an **incoming email** (Part 2) — persists a
+**shipment + its documents**, then calls `run_pipeline()`. LangGraph runs four
+nodes in order: the **Extractor** sends each raw PDF/image to Gemini and gets back
+8 fields with confidence + source snippet; the **Validator** (pure Python —
+auditable, no LLM) checks each field against the customer's rules as match /
+mismatch / **uncertain** (uncertainty always wins, so nothing low-confidence is
+silently approved); the **Cross-Validator** checks shipment-level fields agree
+**across all documents**; the **Router** picks one of three decisions and writes
+the reasoning + draft reply **deterministically** (no LLM). The only LLM call in
+the whole pipeline is the extractor (vision). Each node is **idempotent** and
+records progress in `shipments.stage`, so a failed run is re-enqueued and
+**resumes from where it left off** — extraction is never re-done. Everything is
+stored and queryable, and (Part 2) CG reviews the draft and clicks send.
 
 ---
 
