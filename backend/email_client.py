@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import imaplib
+import re
 import smtplib
 from dataclasses import dataclass, field
 from email import message_from_bytes
@@ -9,9 +10,31 @@ from email.message import EmailMessage
 from email.utils import parseaddr
 
 from backend.config import get_config
-from backend.llm.tracing import log_event
 
 _ATTACH_EXT = {".pdf", ".png", ".jpg", ".jpeg"}
+
+
+def mailbox_uidnext() -> int:
+    """The UID the NEXT new message will get. The poller records this at startup as
+    a baseline, then only fetches mail with UID >= it — so the historical backlog is
+    ignored and only genuinely new arrivals are processed (forever)."""
+    cfg = get_config()
+    if not cfg.email_configured:
+        return 1
+    imap = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port)
+    try:
+        imap.login(cfg.email_user, cfg.email_password)
+        status, data = imap.status(cfg.imap_folder, "(UIDNEXT)")
+        if status == "OK" and data and data[0]:
+            m = re.search(rb"UIDNEXT\s+(\d+)", data[0])
+            if m:
+                return int(m.group(1))
+        return 1
+    finally:
+        try:
+            imap.logout()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 @dataclass
@@ -31,12 +54,17 @@ def _decode(value: str | None) -> str:
         return value
 
 
-def fetch_new_emails(limit: int | None = None) -> tuple[int, list[FetchedEmail]]:
+def fetch_new_emails(min_uid: int | None = None,
+                     limit: int | None = None) -> tuple[int, list[FetchedEmail]]:
+    """Fetch UNSEEN messages with UID >= min_uid (i.e. arrived after the poller's
+    baseline). Reading them marks them \\Seen. Returns (messages_fetched, emails).
+    A custom IMAP_SEARCH overrides the UID range (advanced targeting)."""
     cfg = get_config()
     if not cfg.email_configured:
         return 0, []
-
-    criteria = cfg.imap_search.strip() or "UNSEEN"
+    custom = cfg.imap_search.strip()
+    if not custom and min_uid is None:
+        return 0, []  # never sweep the backlog without a baseline
     cap = cfg.max_fetch_per_poll if limit is None else min(cfg.max_fetch_per_poll, limit)
 
     out: list[FetchedEmail] = []
@@ -45,16 +73,23 @@ def fetch_new_emails(limit: int | None = None) -> tuple[int, list[FetchedEmail]]
     try:
         imap.login(cfg.email_user, cfg.email_password)
         imap.select(cfg.imap_folder)
-        status, data = imap.search(None, criteria)
+        if custom:
+            status, data = imap.uid("search", None, custom)
+        else:
+            status, data = imap.uid("search", None, "UNSEEN", "UID", f"{min_uid}:*")
         if status != "OK" or not data or not data[0]:
             return 0, []
-        ids = data[0].split()
-        if len(ids) > cap:
-            log_event("imap_batch_capped", matched=len(ids), cap=cap, criteria=criteria)
-            ids = ids[-cap:]  # newest only
-        for num in ids:
+        uids = data[0].split()
+        # IMAP quirk: "N:*" also returns the highest UID even if < N — filter it out.
+        if not custom:
+            uids = [u for u in uids if int(u) >= min_uid]
+        if not uids:
+            return 0, []
+        if len(uids) > cap:
+            uids = uids[-cap:]  # newest only
+        for uid in uids:
             fetched += 1
-            status, msg_data = imap.fetch(num, "(RFC822)")
+            status, msg_data = imap.uid("fetch", uid, "(RFC822)")
             if status != "OK" or not msg_data or not msg_data[0]:
                 continue
             msg = message_from_bytes(msg_data[0][1])

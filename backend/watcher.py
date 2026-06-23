@@ -19,7 +19,7 @@ from pathlib import Path
 from backend.config import get_config
 from backend.domain.ids import new_id
 from backend.domain.models import DocumentRef
-from backend.email_client import fetch_new_emails
+from backend.email_client import fetch_new_emails, mailbox_uidnext
 from backend.ingest.email_inbox import EmailInboxIngestor
 from backend.llm.tracing import log_event
 from backend.pipeline.graph import run_pipeline
@@ -113,22 +113,22 @@ def _worker_loop() -> None:
 
 
 def _poller_loop() -> None:
+    """Poll the mailbox forever. A baseline UID is captured once at startup so the
+    historical backlog is ignored; every poll thereafter fetches only mail that
+    arrived AFTER startup (UID >= baseline), capped per poll. The poller never
+    stops — that's how continuously-arriving email keeps getting detected."""
     cfg = get_config()
-    log_event("poller_start", imap_host=cfg.imap_host, user=cfg.email_user,
-              interval_s=cfg.poll_interval_s, max_total_fetch=cfg.max_total_fetch)
-    fetched_total = 0
+    baseline: int | None = None
     while True:
-        if fetched_total >= cfg.max_total_fetch:
-            # Hard session cap reached — stop fetching so we never go beyond the
-            # newest N unread (protects a busy mailbox / backlog).
-            log_event("poller_limit_reached", total=fetched_total)
-            return
         try:
-            remaining = cfg.max_total_fetch - fetched_total
-            n_fetched, emails = fetch_new_emails(limit=remaining)
-            fetched_total += n_fetched  # count every message read (marked seen)
-            for fetched in emails:
-                ingest_fetched_email(fetched)
+            if baseline is None:
+                baseline = mailbox_uidnext()  # only mail newer than this is processed
+                log_event("poller_start", imap_host=cfg.imap_host, user=cfg.email_user,
+                          interval_s=cfg.poll_interval_s, baseline_uid=baseline)
+            else:
+                _, emails = fetch_new_emails(min_uid=baseline, limit=cfg.max_fetch_per_poll)
+                for fetched in emails:
+                    ingest_fetched_email(fetched)
         except Exception as e:  # noqa: BLE001 — never let a transient IMAP error kill the loop
             log_event("poller_error", error=str(e))
         time.sleep(cfg.poll_interval_s)

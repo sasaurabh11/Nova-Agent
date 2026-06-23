@@ -52,9 +52,8 @@ class Config:
     default_customer_id: str
     emails_dir: str          # where fetched attachments are stored
     poll_interval_s: int     # how often to poll IMAP for new mail
-    imap_search: str         # IMAP SEARCH criteria (blank -> UNSEEN)
+    imap_search: str         # IMAP SEARCH override (blank -> UNSEEN since baseline UID)
     max_fetch_per_poll: int  # cap on emails fetched per poll
-    max_total_fetch: int     # hard cap on emails fetched for the whole session
     max_pipeline_attempts: int  # bounded retries before giving up to needs_review
     retry_backoff_s: int     # base delay before re-enqueueing a failed shipment
 
@@ -101,8 +100,7 @@ def get_config() -> Config:
         emails_dir=os.getenv("EMAILS_DIR", "./data/emails"),
         poll_interval_s=_geti("POLL_INTERVAL_S", 15),
         imap_search=os.getenv("IMAP_SEARCH", ""),
-        max_fetch_per_poll=_geti("MAX_FETCH_PER_POLL", 5),
-        max_total_fetch=_geti("MAX_TOTAL_FETCH", 5),
+        max_fetch_per_poll=_geti("MAX_FETCH_PER_POLL", 10),
         max_pipeline_attempts=_geti("MAX_PIPELINE_ATTEMPTS", 3),
         retry_backoff_s=_geti("RETRY_BACKOFF_S", 10),
     )

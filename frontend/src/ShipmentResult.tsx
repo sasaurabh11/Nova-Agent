@@ -241,7 +241,7 @@ export default function ShipmentResult({
               <span className={reply.status === "sent" ? "sent-note" : "composer-note"}>
                 {reply.status === "sent"
                   ? `sent ${(reply.sent_at ?? "").slice(0, 16).replace("T", " ")}`
-                  : "review required · agent never sends on its own"}
+                  : "review required"}
               </span>
             </div>
             <input
